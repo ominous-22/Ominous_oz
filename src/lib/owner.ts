@@ -6,6 +6,8 @@ export type OwnerStatus = {
   passwordSet: boolean;
   /** True only in local dev with no password: the desk is open on this machine. */
   devOpen: boolean;
+  /** Whose desk this is (CARTOGRAPHER_OWNER_NAME, default Ominous_oz). */
+  ownerName: string;
 };
 
 /**
@@ -28,6 +30,7 @@ export const getOwnerStatus = createServerFn({ method: "GET" }).handler(
       signedIn: o.isOwner(),
       passwordSet: o.passwordSet(),
       devOpen: o.devOpen(),
+      ownerName: process.env.CARTOGRAPHER_OWNER_NAME?.trim() || "Ominous_oz",
     };
   },
 );

@@ -15,7 +15,7 @@ function publish(next: OwnerStatus | null) {
 export function refreshOwner(): Promise<void> {
   inflight ??= getOwnerStatus()
     .then((s) => publish(s))
-    .catch(() => publish({ signedIn: false, passwordSet: true, devOpen: false }))
+    .catch(() => publish({ signedIn: false, passwordSet: true, devOpen: false, ownerName: "Ominous_oz" }))
     .finally(() => {
       inflight = null;
     });

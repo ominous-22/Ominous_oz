@@ -30,6 +30,7 @@ localhost only).
 | `CARTOGRAPHER_LLM_TIMEOUT` | `180` | Seconds allowed per model call. |
 | `CARTOGRAPHER_DATA_DIR` | `.data/pglite` | Where the embedded database keeps its files. **Back this folder up.** |
 | `DATABASE_URL` | — | Use an external Postgres instead of the embedded one (`npm run db:migrate` applies the schema). |
+| `CARTOGRAPHER_OWNER_NAME` | `Ominous_oz` | Name shown on the desk. |
 | `CARTOGRAPHER_SECRET` | derived from the password | Signs the sign-in cookie, if you want it independent of the password. |
 | `HOST` / `PORT` | `127.0.0.1` / `3000` | Where the server listens. |
 

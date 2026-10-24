@@ -80,7 +80,7 @@ export function AccountChip() {
       </button>
       {open ? (
         <div className="absolute right-0 z-40 mt-1 w-64 rounded-lg bg-surface p-3 text-sm shadow-[var(--shadow-border-hover)]">
-          <p className="text-fg">Operator</p>
+          <p className="text-fg">{status.ownerName}</p>
           <p className="mt-2 flex items-center gap-2 font-mono text-[11px] tracking-wide text-muted">
             <span aria-hidden className={cn("size-1.5 rounded-full", STATUS_DOT[sync])} />
             {STATUS_TEXT[sync]}
