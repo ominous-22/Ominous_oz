@@ -1,0 +1,10 @@
+node_modules/
+.output/
+.nitro/
+.tanstack/
+.vercel/
+dist/
+# the embedded database (your desk) — back it up, never commit it
+.data/
+.env
+.env.*
