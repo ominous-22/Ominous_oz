@@ -86,6 +86,51 @@ export type PassPayload = {
   6?: Pass6;
 };
 
+/**
+ * Survey — the drift check run after a seal. Compares the Pass 4 blueprint to a
+ * repo digest. Not a pass: re-running a pass wipes later passes, and surveys
+ * must outlive that, so they live in their own append-only list on the run.
+ */
+export type SurveyStatus = "built" | "partial" | "missing" | "contradicted" | "unverified";
+
+export type SurveyItem = {
+  /** A Pass 4 load-bearing line, verbatim. */
+  claim: string;
+  status: SurveyStatus;
+  /** Repo paths, each one listed in the digest the survey was run against. */
+  evidence: string[];
+  note: string;
+};
+
+export type SurveyUnknown = {
+  /** A Pass 4 UNKNOWN, verbatim. */
+  unknown: string;
+  /** What the code decided, or null if still open. Only set with evidence. */
+  resolvedAs: string | null;
+  evidence: string[];
+};
+
+export type SurveyUnmappedKind = "scope creep" | "incidental hardened" | "missing from map";
+
+export type SurveyUnmapped = {
+  /** Something the code has that the blueprint never mentions. */
+  thing: string;
+  kind: SurveyUnmappedKind;
+  evidence: string[];
+};
+
+export type Survey = {
+  id: string;
+  at: string;
+  /** From the digest header, never from the model. */
+  commit: string;
+  loadBearing: SurveyItem[];
+  unknowns: SurveyUnknown[];
+  unmapped: SurveyUnmapped[];
+  /** A finding about the operator, not a verdict on the code. */
+  finding: string;
+};
+
 export type Run = {
   id: string;
   createdAt: string;
@@ -99,6 +144,8 @@ export type Run = {
   viewingPass: PassId;
   passes: PassPayload;
   replies: Partial<Record<PassId, string>>;
+  /** Drift checks against the code, oldest first. Survives pass re-runs. */
+  surveys?: Survey[];
 };
 
 export type OperatorRow = {
