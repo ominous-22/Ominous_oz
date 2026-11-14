@@ -8,9 +8,13 @@ import type {
   PassId,
   PassPayload,
   Run,
+  Survey,
 } from "./types";
 import { highestUnlocked, isPassComplete, mergeLedger } from "./protocol";
 import { newId } from "./utils";
+
+/** Surveys kept per run; the oldest drop off first. */
+export const MAX_SURVEYS = 20;
 
 type State = {
   hydrated: boolean;
@@ -40,6 +44,8 @@ type State = {
   setReply: (id: string, pass: PassId, reply: string) => void;
   setViewing: (id: string, pass: PassId) => void;
   sealRun: (id: string, row: OperatorRow) => void;
+  /** Append a survey. Never touches passes, the seal or the operator log. */
+  addSurvey: (id: string, survey: Survey) => void;
   deleteRun: (id: string) => void;
 };
 
@@ -214,6 +220,12 @@ export const useCartographer = create<State>()(
             ...get().operatorLog.filter((r) => r.runId !== id),
           ],
         });
+      },
+      addSurvey: (id, survey) => {
+        const run = get().runs.find((r) => r.id === id);
+        if (!run || !run.sealed) return;
+        const surveys = [...(run.surveys ?? []), survey].slice(-MAX_SURVEYS);
+        get().updateRun(id, { surveys });
       },
       deleteRun: (id) => {
         set({

@@ -1,5 +1,29 @@
 import { PASS_META } from "./protocol";
-import type { Run } from "./types";
+import { cite, latestSurvey, shortCommit, surveyToPrompt } from "./survey";
+import type { Run, Survey } from "./types";
+
+function surveysToMarkdown(run: Run): string {
+  const list = run.surveys ?? [];
+  if (!list.length) return "";
+  return [
+    "## Surveys",
+    ...list.map((s) =>
+      [
+        `### ${shortCommit(s.commit)} — ${s.at.slice(0, 10)}`,
+        "",
+        ...s.loadBearing.map(
+          (i) => `- **${i.status}** — ${i.claim}${i.note ? ` — ${i.note}` : ""}${cite(i.evidence)}`,
+        ),
+        ...s.unknowns
+          .filter((u) => u.resolvedAs)
+          .map((u) => `- **resolved** — ${u.unknown} → ${u.resolvedAs}${cite(u.evidence)}`),
+        ...s.unmapped.map((u) => `- **${u.kind}** — ${u.thing}${cite(u.evidence)}`),
+        "",
+        s.finding ? `**Finding.** ${s.finding}` : "",
+      ].join("\n"),
+    ),
+  ].join("\n\n");
+}
 
 export function runToMarkdown(run: Run): string {
   const p1 = run.passes[1];
@@ -114,6 +138,8 @@ export function runToMarkdown(run: Run): string {
           `**Try next.** ${p6.tryNext}`,
         ].join("\n")
       : "",
+    "",
+    surveysToMarkdown(run),
   ]
     .filter((line) => line !== undefined)
     .join("\n")
@@ -176,6 +202,8 @@ export function runToPrompt(run: Run): string | null {
       : p5?.script
         ? `## Sixty-second version\n${p5.script}`
         : "",
+    "",
+    latestSurvey(run) ? surveyToPrompt(latestSurvey(run) as Survey) : "",
   ]
     .filter(Boolean)
     .join("\n")

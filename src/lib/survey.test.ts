@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { digestCommit, digestFiles, normalizePath, normalizeSurvey } from "./survey.ts";
+import {
+  digestCommit,
+  digestFiles,
+  latestSurvey,
+  normalizePath,
+  normalizeSurvey,
+  surveyToPrompt,
+} from "./survey.ts";
 import type { Pass4 } from "./types.ts";
 
 const digest = [
@@ -161,4 +168,45 @@ test("garbage in gives an all-unverified survey, not a crash", () => {
     assert.ok(s.unknowns.every((u) => u.resolvedAs === null));
     assert.deepEqual(s.unmapped, []);
   }
+});
+
+test("the prompt section carries only the gap, contradictions first", () => {
+  const s = normalizeSurvey(
+    {
+      loadBearing: [
+        {
+          claim: "Runs sync across devices.",
+          status: "contradicted",
+          evidence: ["src/lib/sync.ts"],
+          note: "polls, no push",
+        },
+        { claim: "Every pass is saved.", status: "built", evidence: ["src/lib/store.ts"] },
+      ],
+      unknowns: [
+        {
+          unknown: "Where the desk is stored",
+          resolvedAs: "Postgres table",
+          evidence: ["migrations/0001.sql"],
+        },
+      ],
+    },
+    ctx,
+  );
+  const text = surveyToPrompt(s);
+  assert.match(text, /^## Survey — code at 8ac046b, 2026-11-05/);
+  assert.ok(text.indexOf("Contradicted") < text.indexOf("Already built"));
+  assert.match(text, /- Runs sync across devices\. — polls, no push \(src\/lib\/sync\.ts\)/);
+  assert.match(
+    text,
+    /### Already built — do not redo\n- Every pass is saved\. \(src\/lib\/store\.ts\)/,
+  );
+  assert.match(text, /Where the desk is stored → Postgres table/);
+  assert.doesNotMatch(text, /Build next/);
+});
+
+test("latestSurvey picks the newest", () => {
+  const a = normalizeSurvey({}, { ...ctx, id: "a" });
+  const b = normalizeSurvey({}, { ...ctx, id: "b" });
+  assert.equal(latestSurvey({ surveys: [a, b] })?.id, "b");
+  assert.equal(latestSurvey({}), undefined);
 });

@@ -1,5 +1,6 @@
 import type {
   Pass4,
+  Run,
   Survey,
   SurveyItem,
   SurveyStatus,
@@ -187,4 +188,61 @@ export function normalizeSurvey(
     unmapped: guardUnmapped(asRecords(body.unmapped), listed),
     finding: asString(body.finding),
   };
+}
+
+/* Exports: the Survey section that rides along in the coding-agent prompt. */
+
+export const shortCommit = (commit: string) =>
+  commit === "unknown" ? "unknown commit" : commit.slice(0, 7);
+export const cite = (evidence: string[]) => (evidence.length ? ` (${evidence.join(", ")})` : "");
+
+/** The newest survey on a run, if any. */
+export function latestSurvey(run: Pick<Run, "surveys">): Survey | undefined {
+  const list = run.surveys ?? [];
+  return list[list.length - 1];
+}
+
+/**
+ * Survey section for the coding-agent prompt: only the gap. What's built is
+ * named so the agent doesn't redo it; contradictions come first because they
+ * need the operator's call before anyone touches them.
+ */
+export function surveyToPrompt(survey: Survey): string {
+  const by = (s: string) => survey.loadBearing.filter((i) => i.status === s);
+  const contradicted = by("contradicted");
+  const todo = [...by("missing"), ...by("partial")];
+  const unverified = by("unverified");
+  const built = by("built");
+  const resolved = survey.unknowns.filter((u) => u.resolvedAs);
+  const section = (title: string, lines: string[]) =>
+    lines.length ? [`### ${title}`, ...lines].join("\n") : "";
+
+  return [
+    `## Survey — code at ${shortCommit(survey.commit)}, ${survey.at.slice(0, 10)}`,
+    "The code is the truth. These lines say where it stands against the blueprint above.",
+    section(
+      "Contradicted — stop and ask the operator before touching",
+      contradicted.map((i) => `- ${i.claim}${i.note ? ` — ${i.note}` : ""}${cite(i.evidence)}`),
+    ),
+    section(
+      "Build next",
+      todo.map(
+        (i) => `- [${i.status}] ${i.claim}${i.note ? ` — ${i.note}` : ""}${cite(i.evidence)}`,
+      ),
+    ),
+    section(
+      "Unverified — check before assuming either way",
+      unverified.map((i) => `- ${i.claim}`),
+    ),
+    section(
+      "Already built — do not redo",
+      built.map((i) => `- ${i.claim}${cite(i.evidence)}`),
+    ),
+    section(
+      "UNKNOWNs the code has settled",
+      resolved.map((u) => `- ${u.unknown} → ${u.resolvedAs}${cite(u.evidence)}`),
+    ),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
