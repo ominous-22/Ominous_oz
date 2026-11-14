@@ -13,7 +13,9 @@ import type {
   Pass5,
   Pass6,
   PassId,
+  Survey,
 } from "./types";
+import { normalizeSurvey } from "./survey";
 
 const SYSTEM = `You are the Idea Cartographer. Not a cheerleader. Not a co-author. Not a product manager.
 
@@ -534,6 +536,223 @@ export const runCartographerPass = createServerFn({ method: "POST" })
           ok: false,
           error: "The cartographer returned an unreadable page. Run the pass again.",
         };
+      }
+    }
+  });
+
+/* ------------------------------------------------------------------------- */
+/* Survey — drift check of a sealed blueprint against the code that was built */
+/* ------------------------------------------------------------------------- */
+
+const SURVEY_SYSTEM = `You are the Idea Cartographer, running a Survey. A survey checks the map against the ground.
+
+The operator sealed a blueprint (Pass 4) and then built some of it. You get the blueprint and a digest of the repo: commit, file list, dependencies, schema, exported names. Your job is to say, for each load-bearing line of the blueprint, whether the code shows it.
+
+Hard rules:
+1. The code is the ground truth. You never suggest editing the code to match the map, or the map to match the code. You report drift; the operator decides.
+2. Evidence is a file path from the digest's file list, copied exactly. Nothing else counts. Do not cite a file that is not listed.
+3. Never invent detail. If the digest does not show it, the status is "unverified", not "built". A file name that sounds right is not proof; the exports or schema must back it.
+4. "contradicted" means the code clearly took a different path than the line says. Say what it did instead.
+5. An UNKNOWN is resolved only when the digest shows what the code decided. Otherwise resolvedAs is null.
+6. "unmapped" lists things the code has that the blueprint never mentions. kind is "scope creep" (new and not asked for), "incidental hardened" (an incidental detail the code turned into structure), or "missing from map" (something the map should have had).
+7. End with one finding about the operator, not a verdict on the code. One or two sentences. Example: "Built three incidental pieces before any load-bearing one."
+
+Tone: cartographic, exact, slightly stern. No pep.
+
+You MUST reply with a single JSON object. No markdown, no fences, no preamble.`;
+
+const SURVEY_SHAPE = `Return JSON:
+{
+  "loadBearing": [
+    {
+      "claim": "the load-bearing line, copied verbatim",
+      "status": "built | partial | missing | contradicted | unverified",
+      "evidence": ["path/from/the/file/list"],
+      "note": "one sentence: what the digest shows, or what is missing"
+    }
+  ],
+  "unknowns": [
+    { "unknown": "the UNKNOWN, copied verbatim", "resolvedAs": "what the code decided, or null", "evidence": ["path"] }
+  ],
+  "unmapped": [
+    { "thing": "short name", "kind": "scope creep | incidental hardened | missing from map", "evidence": ["path"] }
+  ],
+  "finding": "one or two sentences about the operator"
+}
+
+Include every load-bearing line and every UNKNOWN exactly once, in order.`;
+
+export type SurveyRequest = {
+  title: string;
+  blueprint: Pass4;
+  ledger: Gloss[];
+  /** A digest from scripts/digest.mjs, pasted in. */
+  digest?: string;
+  /** Or a folder the server can read; the server builds the digest itself. */
+  repoPath?: string;
+  /** The last survey's commit, so the model can say what moved. */
+  priorCommit?: string;
+};
+
+export type SurveyResult =
+  { ok: true; survey: Survey; digestChars: number } | { ok: false; error: string };
+
+const SURVEY_MAX = {
+  digest: 40_000,
+  repoPath: 1_000,
+  title: 300,
+  blueprintJson: 40_000,
+};
+
+function validateSurveyRequest(input: unknown): SurveyRequest {
+  const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const b = (o.blueprint && typeof o.blueprint === "object" ? o.blueprint : null) as Pass4 | null;
+  if (!b || !b.l3 || !Array.isArray(b.l3.loadBearing) || !Array.isArray(b.unknowns)) {
+    throw new Error("This run has no Pass 4 blueprint to survey.");
+  }
+  if (JSON.stringify(b).length > SURVEY_MAX.blueprintJson) {
+    throw new Error("The blueprint is too large to survey.");
+  }
+  const blueprint: Pass4 = {
+    l1: str(b.l1, 2_000, "L1"),
+    l2: str(b.l2, 8_000, "L2"),
+    l3: {
+      components: str(b.l3.components, 8_000, "Components"),
+      dataFlow: str(b.l3.dataFlow, 8_000, "Data flow"),
+      constraints: str(b.l3.constraints, 8_000, "Constraints"),
+      loadBearing: b.l3.loadBearing.slice(0, 40).map((x) => str(x, 1_000, "A load-bearing line")),
+      incidental: (Array.isArray(b.l3.incidental) ? b.l3.incidental : [])
+        .slice(0, 40)
+        .map((x) => str(x, 1_000, "An incidental line")),
+    },
+    unknowns: b.unknowns.slice(0, 40).map((x) => str(x, 1_000, "An UNKNOWN")),
+  };
+  const ledgerRaw = Array.isArray(o.ledger) ? o.ledger.slice(0, MAX.ledgerItems) : [];
+  const ledger: Gloss[] = ledgerRaw.map((g) => {
+    const x = (g ?? {}) as Record<string, unknown>;
+    return {
+      term: str(x.term, MAX.term, "A ledger term"),
+      gloss: str(x.gloss, MAX.gloss, "A gloss"),
+      source: x.source === "operator" ? "operator" : "dump",
+    };
+  });
+  const digest = o.digest == null ? undefined : str(o.digest, SURVEY_MAX.digest, "The digest");
+  const repoPath =
+    o.repoPath == null ? undefined : str(o.repoPath, SURVEY_MAX.repoPath, "The repo path").trim();
+  if (!digest?.trim() && !repoPath) {
+    throw new Error("Paste a repo digest, or give a repo folder the server can read.");
+  }
+  return {
+    title: str(o.title, SURVEY_MAX.title, "The title"),
+    blueprint,
+    ledger,
+    digest: digest?.trim() || undefined,
+    repoPath: repoPath || undefined,
+    priorCommit: typeof o.priorCommit === "string" ? o.priorCommit.slice(0, 64) : undefined,
+  };
+}
+
+function surveyPayload(req: SurveyRequest, digest: string): string {
+  const p4 = req.blueprint;
+  const ledger = req.ledger.length
+    ? req.ledger.map((g) => `- ${g.term}: ${g.gloss.trim() || "UNGLOSSED"}`).join("\n")
+    : "(empty)";
+  return [
+    `RUN: ${req.title || "(untitled)"}`,
+    "",
+    `L1: ${p4.l1}`,
+    "",
+    `L2: ${p4.l2}`,
+    "",
+    `Components: ${p4.l3.components}`,
+    `Data flow: ${p4.l3.dataFlow}`,
+    `Constraints: ${p4.l3.constraints}`,
+    "",
+    "LOAD-BEARING (survey each, copy verbatim):",
+    ...(p4.l3.loadBearing.length ? p4.l3.loadBearing.map((x) => `- ${x}`) : ["(none)"]),
+    "",
+    "INCIDENTAL (not requirements; flag if the code hardened them):",
+    ...(p4.l3.incidental.length ? p4.l3.incidental.map((x) => `- ${x}`) : ["(none)"]),
+    "",
+    "UNKNOWNs (copy verbatim):",
+    ...(p4.unknowns.length ? p4.unknowns.map((x) => `- ${x}`) : ["(none)"]),
+    "",
+    "LEDGER:",
+    ledger,
+    "",
+    req.priorCommit ? `LAST SURVEY WAS AT COMMIT: ${req.priorCommit}` : "FIRST SURVEY OF THIS RUN.",
+    "",
+    "REPO DIGEST:",
+    digest,
+    "",
+    SURVEY_SHAPE,
+  ].join("\n");
+}
+
+/** Build a digest of a folder on the server's own machine. */
+async function digestFromPath(repoPath: string): Promise<string> {
+  const { statSync } = await import("node:fs");
+  try {
+    if (!statSync(repoPath).isDirectory()) throw new Error();
+  } catch {
+    throw new Error(`The server can't see a folder at ${repoPath}.`);
+  }
+  const { buildDigest } = await import("../../scripts/digest.mjs");
+  return buildDigest(repoPath);
+}
+
+export const runSurvey = createServerFn({ method: "POST" })
+  .validator(validateSurveyRequest)
+  .middleware([ownerMiddleware])
+  .handler(async ({ data }): Promise<SurveyResult> => {
+    let digest: string;
+    try {
+      digest = data.digest ?? (await digestFromPath(data.repoPath ?? ""));
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "Could not read the repo." };
+    }
+    if (!/^## Files\b/m.test(digest)) {
+      return {
+        ok: false,
+        error:
+          'That doesn\'t look like a repo digest (no "## Files" section). Make one with npm run digest.',
+      };
+    }
+
+    const messages: Message[] = [
+      { role: "system", content: SURVEY_SYSTEM },
+      { role: "user", content: surveyPayload(data, digest) },
+    ];
+    const finish = (text: string): SurveyResult => ({
+      ok: true,
+      survey: normalizeSurvey(extractJson(text), {
+        blueprint: data.blueprint,
+        digest,
+        id: `sv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        at: new Date().toISOString(),
+      }),
+      digestChars: digest.length,
+    });
+
+    let call = await callModel(messages);
+    if (!call.ok) return call;
+    try {
+      return finish(call.text);
+    } catch {
+      call = await callModel([
+        ...messages,
+        { role: "assistant", content: call.text },
+        {
+          role: "user",
+          content:
+            "Your last reply was not valid JSON. Reply again with ONLY the JSON object specified.",
+        },
+      ]);
+      if (!call.ok) return call;
+      try {
+        return finish(call.text);
+      } catch {
+        return { ok: false, error: "The survey came back unreadable. Run it again." };
       }
     }
   });

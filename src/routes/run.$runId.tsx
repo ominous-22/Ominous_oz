@@ -4,6 +4,7 @@ import { LedgerPanel } from "@/components/ledger-panel";
 import { OperatorPortrait } from "@/components/mark";
 import { PassRail } from "@/components/pass-rail";
 import { PassWork } from "@/components/pass-work";
+import { SurveyPanel } from "@/components/survey-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { runCartographerPass } from "@/lib/cartographer";
@@ -190,12 +191,15 @@ function RunDesk() {
 
       <div className="grid gap-6 lg:grid-cols-[13rem_minmax(0,1fr)_18rem]">
         <PassRail run={run} onSelect={(p) => setViewing(run.id, p)} />
-        <PassWork
-          run={run}
-          busy={busy}
-          error={error}
-          onRun={(p) => void runPass(p)}
-        />
+        <div className="flex min-w-0 flex-col gap-8">
+          <PassWork
+            run={run}
+            busy={busy}
+            error={error}
+            onRun={(p) => void runPass(p)}
+          />
+          <SurveyPanel run={run} />
+        </div>
         <div className="hidden lg:block">
           <LedgerPanel
             ledger={run.ledger}
