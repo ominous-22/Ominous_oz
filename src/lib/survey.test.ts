@@ -6,6 +6,9 @@ import {
   latestSurvey,
   normalizePath,
   normalizeSurvey,
+  parseDigestMode,
+  stalenessNote,
+  stalenessOf,
   surveyToPrompt,
 } from "./survey.ts";
 import type { Pass4 } from "./types.ts";
@@ -209,4 +212,60 @@ test("latestSurvey picks the newest", () => {
   const b = normalizeSurvey({}, { ...ctx, id: "b" });
   assert.equal(latestSurvey({ surveys: [a, b] })?.id, "b");
   assert.equal(latestSurvey({}), undefined);
+});
+
+const depthDigest = digest
+  .replace("generated:", "mode: depth\ngenerated:")
+  .replace("src/lib/sync.ts\n", "");
+
+test("a depth digest strips evidence outside its shorter file list, and says why", () => {
+  const raw = {
+    loadBearing: [
+      { claim: "Runs sync across devices.", status: "built", evidence: ["src/lib/sync.ts"] },
+      { claim: "Every pass is saved.", status: "built", evidence: ["src/lib/store.ts"] },
+    ],
+  };
+  const s = normalizeSurvey(raw, { ...ctx, digest: depthDigest });
+  assert.equal(s.mode, "depth");
+  assert.equal(s.loadBearing[0].status, "unverified");
+  assert.deepEqual(s.loadBearing[0].evidence, []);
+  assert.match(s.loadBearing[0].note, /^Not measured at this depth/);
+  assert.equal(s.loadBearing[1].status, "built");
+  assert.equal(normalizeSurvey(raw, ctx).mode, "breadth");
+});
+
+test("older surveys with no mode still load and export", () => {
+  const old = normalizeSurvey({}, ctx);
+  delete old.mode;
+  assert.equal(latestSurvey({ surveys: [old] })?.id, "sv-1");
+  assert.match(surveyToPrompt(old), /## Survey/);
+});
+
+test("the request validator rejects an unknown mode", () => {
+  assert.equal(parseDigestMode(undefined), undefined);
+  assert.equal(parseDigestMode(null), undefined);
+  assert.equal(parseDigestMode("depth"), "depth");
+  assert.throws(() => parseDigestMode("sideways"), /Unknown digest mode/);
+  assert.throws(() => parseDigestMode(1), /Unknown digest mode/);
+});
+
+test("staleness is counted in commits, with unknown as its own state", () => {
+  assert.equal(stalenessOf(0), "fresh");
+  assert.equal(stalenessOf(1), "aging");
+  assert.equal(stalenessOf(10), "aging");
+  assert.equal(stalenessOf(11), "stale");
+  assert.equal(stalenessOf("unknown"), "unknown");
+  assert.equal(stalenessOf(-1), "unknown");
+  assert.equal(stalenessOf(Number.NaN), "unknown");
+});
+
+test("the agent prompt says when a survey is stale, and never guesses", () => {
+  const s = normalizeSurvey({}, ctx);
+  assert.doesNotMatch(surveyToPrompt(s, { commitsSince: 0 }), /Note:/);
+  const stale = surveyToPrompt(s, { commitsSince: 14 });
+  assert.match(stale, /14 commits have landed since this survey \(taken at 8ac046b\)/);
+  assert.match(stale, /re-survey first/);
+  assert.match(surveyToPrompt(s, { commitsSince: 1 }), /1 commit has landed/);
+  assert.match(stalenessNote(s), /git rev-list --count 8ac046b/);
+  assert.match(stalenessNote({ ...s, commit: "unknown" }), /no commit on record/);
 });

@@ -13,9 +13,10 @@ import type {
   Pass5,
   Pass6,
   PassId,
+  DigestMode,
   Survey,
 } from "./types";
-import { normalizeSurvey } from "./survey";
+import { normalizeSurvey, parseDigestMode } from "./survey";
 
 const SYSTEM = `You are the Idea Cartographer. Not a cheerleader. Not a co-author. Not a product manager.
 
@@ -592,6 +593,8 @@ export type SurveyRequest = {
   repoPath?: string;
   /** The last survey's commit, so the model can say what moved. */
   priorCommit?: string;
+  /** How the server spends the digest budget when it builds the digest itself. */
+  mode?: DigestMode;
 };
 
 export type SurveyResult =
@@ -649,6 +652,7 @@ function validateSurveyRequest(input: unknown): SurveyRequest {
     digest: digest?.trim() || undefined,
     repoPath: repoPath || undefined,
     priorCommit: typeof o.priorCommit === "string" ? o.priorCommit.slice(0, 64) : undefined,
+    mode: parseDigestMode(o.mode),
   };
 }
 
@@ -690,7 +694,7 @@ function surveyPayload(req: SurveyRequest, digest: string): string {
 }
 
 /** Build a digest of a folder on the server's own machine. */
-async function digestFromPath(repoPath: string): Promise<string> {
+async function digestFromPath(repoPath: string, mode?: DigestMode): Promise<string> {
   const { statSync } = await import("node:fs");
   try {
     if (!statSync(repoPath).isDirectory()) throw new Error();
@@ -698,7 +702,7 @@ async function digestFromPath(repoPath: string): Promise<string> {
     throw new Error(`The server can't see a folder at ${repoPath}.`);
   }
   const { buildDigest } = await import("../../scripts/digest.mjs");
-  return buildDigest(repoPath);
+  return buildDigest(repoPath, { mode });
 }
 
 export const runSurvey = createServerFn({ method: "POST" })
@@ -707,7 +711,7 @@ export const runSurvey = createServerFn({ method: "POST" })
   .handler(async ({ data }): Promise<SurveyResult> => {
     let digest: string;
     try {
-      digest = data.digest ?? (await digestFromPath(data.repoPath ?? ""));
+      digest = data.digest ?? (await digestFromPath(data.repoPath ?? "", data.mode));
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "Could not read the repo." };
     }
@@ -755,4 +759,43 @@ export const runSurvey = createServerFn({ method: "POST" })
         return { ok: false, error: "The survey came back unreadable. Run it again." };
       }
     }
+  });
+
+export type RepoCommitRequest = { repoPath: string; since?: string };
+export type RepoCommitResult = {
+  /** HEAD of the folder, or null when it isn't a git repo the server can read. */
+  commit: string | null;
+  /** Commits since `since`; "unknown" when it can't be counted. Absent without `since`. */
+  commitsSince?: number | "unknown";
+};
+
+function validateRepoCommit(input: unknown): RepoCommitRequest {
+  const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const repoPath = str(o.repoPath, SURVEY_MAX.repoPath, "The repo path").trim();
+  if (!repoPath) throw new Error("Give a repo folder the server can read.");
+  return {
+    repoPath,
+    since: typeof o.since === "string" ? o.since.slice(0, 64) : undefined,
+  };
+}
+
+/**
+ * Where the repo is now, and how far it has moved since a survey. Node-only
+ * work happens behind a dynamic import so it never reaches the browser bundle.
+ */
+export const getRepoCommit = createServerFn({ method: "POST" })
+  .validator(validateRepoCommit)
+  .middleware([ownerMiddleware])
+  .handler(async ({ data }): Promise<RepoCommitResult> => {
+    const { statSync } = await import("node:fs");
+    try {
+      if (!statSync(data.repoPath).isDirectory()) throw new Error();
+    } catch {
+      return { commit: null };
+    }
+    const { commitOf, commitsSince } = await import("../../scripts/digest.mjs");
+    const head = commitOf(data.repoPath);
+    const commit = head === "unknown" ? null : head;
+    if (!data.since) return { commit };
+    return { commit, commitsSince: commit ? commitsSince(data.repoPath, data.since) : "unknown" };
   });

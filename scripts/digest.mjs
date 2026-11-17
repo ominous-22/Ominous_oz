@@ -17,6 +17,21 @@ import { pathToFileURL } from "node:url";
 
 export const DEFAULT_MAX_CHARS = 12_000;
 
+/**
+ * A digest is a measurement with a fixed budget, so it trades breadth (more
+ * files listed) against depth (more exports and schema per file). The mode is
+ * recorded in the digest header so two surveys can be compared.
+ * Current defaults, not rules.
+ */
+/** @typedef {"breadth" | "depth"} DigestMode */
+/** @type {DigestMode[]} */
+export const DIGEST_MODES = ["breadth", "depth"];
+/** @type {DigestMode} */
+export const DEFAULT_MODE = "breadth";
+/** Share of the budget the file list may take, per mode. */
+/** @type {Record<DigestMode, number>} */
+export const FILE_SHARE = { breadth: 0.5, depth: 0.3 };
+
 /** Directories that are never source. */
 const SKIP_DIRS = new Set([
   ".git",
@@ -142,6 +157,29 @@ export function commitOf(root) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * How many commits sit between `from` and HEAD (git rev-list --count from..HEAD).
+ * Returns "unknown" when either end isn't a commit here, or history is
+ * shallow: never 0 or null, because those would read as "nothing changed".
+ * @param {string} root
+ * @param {string} from  a full or abbreviated commit hash
+ * @returns {number | "unknown"}
+ */
+export function commitsSince(root, from) {
+  if (!/^[0-9a-f]{7,40}$/.test(from)) return "unknown";
+  try {
+    const out = execFileSync("git", ["rev-list", "--count", `${from}..HEAD`], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    const n = Number(out);
+    return Number.isInteger(n) && n >= 0 ? n : "unknown";
   } catch {
     return "unknown";
   }
@@ -287,10 +325,11 @@ function capLines(lines, budget) {
  * then schema, then dependencies. The file list is kept as long as possible
  * because it is the evidence the guard checks against.
  * @param {string} root
- * @param {{ maxChars?: number, now?: Date }} [opts]
+ * @param {{ maxChars?: number, now?: Date, mode?: "breadth" | "depth" }} [opts]
  */
 export function buildDigest(root, opts = {}) {
   const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
+  const mode = opts.mode && DIGEST_MODES.includes(opts.mode) ? opts.mode : DEFAULT_MODE;
   const files = listFiles(root);
   const exportLines = files
     .filter((f) => CODE_EXT.has(extname(f).toLowerCase()) && !/\.test\.|\.gen\./.test(f))
@@ -306,13 +345,14 @@ export function buildDigest(root, opts = {}) {
   const header = [
     "# Repo digest",
     `commit: ${commitOf(root)}`,
+    `mode: ${mode}`,
     `generated: ${(opts.now ?? new Date()).toISOString()}`,
     `repo: ${basename(resolve(root))}`,
   ].join("\n");
 
-  // Budget: header, then up to half for files, then deps, schema, exports.
+  // Budget: header, then the mode's share for files, then deps, schema, exports.
   let left = maxChars - header.length - 64;
-  const fileBlock = capLines(files, Math.max(500, Math.floor(left / 2)));
+  const fileBlock = capLines(files, Math.max(500, Math.floor(left * FILE_SHARE[mode])));
   left -= fileBlock.join("\n").length;
   const depBlock = capLines(deps, Math.max(0, Math.min(left, 1500)));
   left -= depBlock.join("\n").length;
@@ -342,9 +382,18 @@ function main() {
   const args = process.argv.slice(2);
   const maxAt = args.indexOf("--max");
   const maxChars = maxAt >= 0 ? Number(args[maxAt + 1]) : DEFAULT_MAX_CHARS;
-  const root = args.find((a, i) => !a.startsWith("--") && (maxAt < 0 || i !== maxAt + 1));
-  if (!root || !Number.isFinite(maxChars) || maxChars < 1000) {
-    process.stderr.write("usage: node scripts/digest.mjs <repoPath> [--max 12000]\n");
+  const modeAt = args.indexOf("--mode");
+  const modeArg = modeAt >= 0 ? args[modeAt + 1] : DEFAULT_MODE;
+  const mode = DIGEST_MODES.find((m) => m === modeArg);
+  /** @param {number} flagAt @param {number} i */
+  const isValueOf = (flagAt, i) => flagAt >= 0 && i === flagAt + 1;
+  const root = args.find(
+    (a, i) => !a.startsWith("--") && !isValueOf(maxAt, i) && !isValueOf(modeAt, i),
+  );
+  if (!root || !Number.isFinite(maxChars) || maxChars < 1000 || !mode) {
+    process.stderr.write(
+      "usage: node scripts/digest.mjs <repoPath> [--max 12000] [--mode breadth|depth]\n",
+    );
     process.exit(2);
   }
   try {
@@ -353,7 +402,7 @@ function main() {
     process.stderr.write(`not a folder: ${root}\n`);
     process.exit(2);
   }
-  process.stdout.write(buildDigest(root, { maxChars }));
+  process.stdout.write(buildDigest(root, { maxChars, mode }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
-import { buildDigest, exportsOf, isListed, listFiles } from "./digest.mjs";
+import { execFileSync } from "node:child_process";
+import { buildDigest, commitOf, commitsSince, exportsOf, isListed, listFiles } from "./digest.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "digest-"));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -69,4 +70,64 @@ test("stays under the size cap", () => {
   const d = buildDigest(root, { maxChars: 3000 });
   assert.ok(d.length <= 3000, `digest was ${d.length} chars`);
   assert.match(d, /more not listed/);
+});
+
+/** Files listed under `## Files` in a digest. */
+const listedIn = (/** @type {string} */ d) =>
+  (d.split("## Files")[1] ?? "")
+    .split("\n## ")[0]
+    .split("\n")
+    .slice(1)
+    .filter((l) => /\.\w+$/.test(l));
+
+test("depth lists fewer files than breadth but keeps exports and schema", () => {
+  const breadth = buildDigest(root, { maxChars: 3000, mode: "breadth" });
+  const depth = buildDigest(root, { maxChars: 3000, mode: "depth" });
+  assert.match(breadth, /^mode: breadth$/m);
+  assert.match(depth, /^mode: depth$/m);
+  assert.ok(
+    listedIn(depth).length < listedIn(breadth).length,
+    `depth listed ${listedIn(depth).length}, breadth ${listedIn(breadth).length}`,
+  );
+  assert.match(depth, /## Exports/);
+  assert.match(depth, /## Schema/);
+  for (const d of [breadth, depth]) {
+    assert.ok(d.length <= 3000, `digest was ${d.length} chars`);
+    assert.doesNotMatch(d, /SECRET|leak|package-lock/);
+  }
+});
+
+test("an unknown mode falls back to breadth", () => {
+  // @ts-expect-error deliberately bad input
+  assert.match(buildDigest(root, { mode: "sideways" }), /^mode: breadth$/m);
+});
+
+test("commitsSince counts commits, and says unknown instead of guessing", () => {
+  const repo = mkdtempSync(join(tmpdir(), "digest-git-"));
+  try {
+    const git = (/** @type {string[]} */ ...a) =>
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a], {
+        cwd: repo,
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+      });
+    git("init", "-q");
+    writeFileSync(join(repo, "a.txt"), "1");
+    git("add", ".");
+    git("commit", "-qm", "one");
+    const first = commitOf(repo);
+    assert.equal(commitsSince(repo, first), 0);
+    for (const n of ["2", "3"]) {
+      writeFileSync(join(repo, "a.txt"), n);
+      git("commit", "-qam", n);
+    }
+    assert.equal(commitsSince(repo, first), 2);
+    assert.equal(commitsSince(repo, first.slice(0, 7)), 2);
+    assert.equal(commitsSince(repo, "deadbeefdeadbeef"), "unknown");
+    assert.equal(commitsSince(repo, "unknown"), "unknown");
+    assert.equal(commitsSince(repo, "HEAD; rm -rf /"), "unknown");
+    assert.equal(commitsSince(tmpdir(), first), "unknown");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

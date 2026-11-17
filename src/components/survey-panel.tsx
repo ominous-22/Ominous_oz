@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { runSurvey } from "@/lib/cartographer";
-import { latestSurvey, shortCommit } from "@/lib/survey";
+import { getRepoCommit, runSurvey } from "@/lib/cartographer";
+import { AGING_MAX_COMMITS, latestSurvey, shortCommit, stalenessOf } from "@/lib/survey";
+import type { Staleness } from "@/lib/survey";
 import { useCartographer } from "@/lib/store";
 import { markSignedOut } from "@/lib/use-owner";
-import type { Run, Survey, SurveyStatus } from "@/lib/types";
+import type { DigestMode, Run, Survey, SurveyStatus } from "@/lib/types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -16,6 +17,21 @@ const STATUS_TONE: Record<SurveyStatus, "ok" | "accent" | "warn" | "danger" | "m
   contradicted: "danger",
   unverified: "muted",
 };
+
+const STALE_TONE: Record<Staleness, "ok" | "accent" | "warn" | "muted"> = {
+  fresh: "ok",
+  aging: "accent",
+  stale: "warn",
+  unknown: "muted",
+};
+
+const MODE_HELP: Record<DigestMode, string> = {
+  breadth: "Breadth lists more files, so more claims can be checked. Shallower on each file.",
+  depth:
+    "Depth shows more exports and schema per file, but lists fewer files. Claims outside the list read as not measured.",
+};
+
+type Drift = { commitsSince: number | "unknown" };
 
 const STATUS_ORDER: SurveyStatus[] = ["contradicted", "missing", "partial", "unverified", "built"];
 
@@ -51,10 +67,35 @@ export function SurveyPanel({ run }: { run: Run }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewing, setViewing] = useState<string | null>(null);
+  const [digestMode, setDigestMode] = useState<DigestMode>("breadth");
+  const [drift, setDrift] = useState<Record<string, Drift>>({});
 
   useEffect(() => {
     setRepoPath(readPath(run.id));
   }, [run.id]);
+
+  const watched = surveys.find((s) => s.id === viewing) ?? latestSurvey(run);
+  const watchedId = watched?.id;
+  const watchedCommit = watched?.commit;
+
+  // How far the repo has moved since the survey being viewed. Quiet on any
+  // failure: staleness stays "unknown" instead of guessing.
+  useEffect(() => {
+    const path = readPath(run.id);
+    if (!watchedId || !watchedCommit || !run.sealed || !path) return;
+    let live = true;
+    getRepoCommit({ data: { repoPath: path, since: watchedCommit } })
+      .then((r) => {
+        if (live)
+          setDrift((d) => ({ ...d, [watchedId]: { commitsSince: r.commitsSince ?? "unknown" } }));
+      })
+      .catch(() => {
+        if (live) setDrift((d) => ({ ...d, [watchedId]: { commitsSince: "unknown" } }));
+      });
+    return () => {
+      live = false;
+    };
+  }, [run.id, run.sealed, watchedId, watchedCommit, surveys.length]);
 
   if (!blueprint) return null;
 
@@ -72,30 +113,32 @@ export function SurveyPanel({ run }: { run: Run }) {
 
   const shown: Survey | undefined = surveys.find((s) => s.id === viewing) ?? latestSurvey(run);
 
-  async function go() {
+  async function go(again?: { mode: DigestMode }) {
     if (!blueprint) return;
     setBusy(true);
     setError(null);
     try {
-      const path = repoPath.trim();
+      const viaPath = again ? true : mode === "path";
+      const path = (again ? readPath(run.id) : repoPath).trim();
       const result = await runSurvey({
         data: {
           title: run.title,
           blueprint,
           ledger: run.ledger,
-          digest: mode === "paste" ? digest : undefined,
-          repoPath: mode === "path" ? path : undefined,
+          digest: viaPath ? undefined : digest,
+          repoPath: viaPath ? path : undefined,
           priorCommit: latestSurvey(run)?.commit,
+          mode: again?.mode ?? digestMode,
         },
       });
       if (!result.ok) {
         setError(result.error);
         return;
       }
-      if (mode === "path") savePath(run.id, path);
+      if (viaPath) savePath(run.id, path);
       addSurvey(run.id, result.survey);
       setViewing(result.survey.id);
-      if (mode === "paste") setDigest("");
+      if (!viaPath) setDigest("");
     } catch (err) {
       const message = err instanceof Error ? err.message : "";
       if (message === "Unauthorized") markSignedOut();
@@ -177,6 +220,30 @@ export function SurveyPanel({ run }: { run: Run }) {
           </div>
         )}
 
+        {mode === "path" ? (
+          <div className="flex flex-col gap-1">
+            <div
+              className="flex gap-2"
+              role="radiogroup"
+              aria-label="How the digest spends its budget"
+            >
+              {(["breadth", "depth"] as const).map((m) => (
+                <Button
+                  key={m}
+                  size="sm"
+                  variant={digestMode === m ? "secondary" : "ghost"}
+                  role="radio"
+                  aria-checked={digestMode === m}
+                  onClick={() => setDigestMode(m)}
+                >
+                  {m === "breadth" ? "Breadth" : "Depth"}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-muted">{MODE_HELP[digestMode]}</p>
+          </div>
+        ) : null}
+
         <div className="flex flex-wrap items-center gap-3">
           <Button onClick={() => void go()} disabled={busy || !ready}>
             {surveys.length ? "Survey again" : "Run survey"}
@@ -208,12 +275,32 @@ export function SurveyPanel({ run }: { run: Run }) {
         </div>
       ) : null}
 
-      {shown ? <SurveyView survey={shown} /> : null}
+      {shown ? (
+        <SurveyView
+          survey={shown}
+          commitsSince={drift[shown.id]?.commitsSince}
+          busy={busy}
+          onResurvey={
+            readPath(run.id) ? () => void go({ mode: shown.mode ?? "breadth" }) : undefined
+          }
+        />
+      ) : null}
     </section>
   );
 }
 
-function SurveyView({ survey }: { survey: Survey }) {
+function SurveyView({
+  survey,
+  commitsSince,
+  busy,
+  onResurvey,
+}: {
+  survey: Survey;
+  commitsSince?: number | "unknown";
+  busy: boolean;
+  onResurvey?: () => void;
+}) {
+  const staleness = stalenessOf(commitsSince ?? "unknown");
   const counts = STATUS_ORDER.map(
     (s) => [s, survey.loadBearing.filter((i) => i.status === s).length] as const,
   ).filter(([, n]) => n > 0);
@@ -229,11 +316,33 @@ function SurveyView({ survey }: { survey: Survey }) {
         <span className="font-mono text-xs text-subtle">
           {shortCommit(survey.commit)} · {survey.at.slice(0, 10)}
         </span>
+        <span className="font-mono text-xs text-subtle">{survey.mode ?? "breadth"}</span>
         {counts.map(([s, n]) => (
           <Badge key={s} tone={STATUS_TONE[s]}>
             {n} {s}
           </Badge>
         ))}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={STALE_TONE[staleness]}>
+          {staleness === "fresh"
+            ? "Fresh: no commits since"
+            : staleness === "unknown"
+              ? "Age unknown: can't count commits"
+              : `${staleness === "aging" ? "Aging" : "Stale"}: ${commitsSince} commit${commitsSince === 1 ? "" : "s"} since`}
+        </Badge>
+        {staleness === "stale" || staleness === "aging" ? (
+          <p className="text-xs text-muted">
+            Stale means more than {AGING_MAX_COMMITS} commits since the survey. Findings may no
+            longer describe the code.
+          </p>
+        ) : null}
+        {staleness === "stale" && onResurvey ? (
+          <Button size="sm" onClick={onResurvey} disabled={busy}>
+            Re-survey now
+          </Button>
+        ) : null}
       </div>
 
       <div>
