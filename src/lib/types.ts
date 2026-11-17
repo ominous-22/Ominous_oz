@@ -119,11 +119,16 @@ export type SurveyUnmapped = {
   evidence: string[];
 };
 
+/** How a digest spent its budget: more files listed, or more exports and schema. */
+export type DigestMode = "breadth" | "depth";
+
 export type Survey = {
   id: string;
   at: string;
   /** From the digest header, never from the model. */
   commit: string;
+  /** The digest mode used. Absent on older surveys, which were all breadth. */
+  mode?: DigestMode;
   loadBearing: SurveyItem[];
   unknowns: SurveyUnknown[];
   unmapped: SurveyUnmapped[];
